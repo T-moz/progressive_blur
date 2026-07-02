@@ -39,6 +39,44 @@ ProgressiveBlurWidget.custom(
 )
 ```
 
+## Rendering implementations
+
+The package ships two implementations of the blur:
+
+- **`ImageFilter.shader` (Impeller only)**: the two blur passes are applied as
+  chained [`ui.ImageFilter.shader`](https://api.flutter.dev/flutter/dart-ui/ImageFilter/ImageFilter.shader.html)
+  filters via an `ImageFiltered` widget. This avoids rendering the subtree into
+  an intermediate `ui.Image` every frame. Requires Flutter 3.35+ and the
+  Impeller rendering engine.
+- **`AnimatedSampler` (fallback)**: the original implementation — the subtree
+  is rendered into a composited layer and the resulting `ui.Image` is bound as
+  a shader sampler. Works on Skia and on the web.
+
+By default, the implementation is selected automatically at runtime via
+`ui.ImageFilter.isShaderFilterSupported`. You can override the selection with
+the static `useImageFilter` toggle:
+
+```dart
+// null (default): pick automatically — ImageFilter.shader on Impeller,
+// AnimatedSampler otherwise.
+ProgressiveBlurWidget.useImageFilter = null;
+
+// Force the ImageFilter.shader implementation.
+ProgressiveBlurWidget.useImageFilter = true;
+
+// Force the AnimatedSampler implementation.
+ProgressiveBlurWidget.useImageFilter = false;
+```
+
+The toggle can be changed at any time (existing widgets pick it up on their
+next rebuild), and both implementations render identically.
+
+> [!NOTE]
+> With the `ImageFilter.shader` implementation, the blur parameters are read
+> when the widget is built or its configuration changes — animating them every
+> frame is not supported yet (see
+> [flutter/flutter#163302](https://github.com/flutter/flutter/issues/163302)).
+
 ## Additional information
 
 Feel free to report bugs/issues on GitHub.
