@@ -5,7 +5,7 @@ homepage: https://github.com/kekland/progressive_blur
 
 environment:
   sdk: ^3.5.3
-  flutter: ">=3.30.0"
+  flutter: ">=3.35.0"
 
 dependencies:
   flutter:
