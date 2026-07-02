@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:math' as math;
+import 'dart:ui' as ui;
 
 import 'package:example/albums.dart';
 import 'package:figma_squircle/figma_squircle.dart';
@@ -45,10 +46,22 @@ class _MainPageState extends State<MainPage> {
   var _displayIndex = 0;
   final _albums = <(String, String, String, String)>[];
 
+  var _useImageFilter = false;
+
   @override
   void initState() {
     super.initState();
     _loadAlbums();
+
+    _useImageFilter = ProgressiveBlurWidget.useImageFilter ??
+        ui.ImageFilter.isShaderFilterSupported;
+  }
+
+  void _setUseImageFilter(bool value) {
+    setState(() {
+      _useImageFilter = value;
+      ProgressiveBlurWidget.useImageFilter = value;
+    });
   }
 
   void _loadAlbums() {
@@ -129,18 +142,43 @@ class _MainPageState extends State<MainPage> {
     };
 
     return Scaffold(
-      bottomNavigationBar: CupertinoTabBar(
-        currentIndex: _displayIndex,
-        onTap: (index) => setState(() => _displayIndex = index),
-        iconSize: 22.0,
-        items: const [
-          BottomNavigationBarItem(
-            icon: Icon(CupertinoIcons.music_note),
-            label: 'Music',
+      bottomNavigationBar: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          ColoredBox(
+            color: CupertinoColors.systemBackground.resolveFrom(context),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(
+                horizontal: 16.0,
+                vertical: 4.0,
+              ),
+              child: Row(
+                children: [
+                  const Expanded(
+                    child: Text('Use ImageFilter.shader'),
+                  ),
+                  CupertinoSwitch(
+                    value: _useImageFilter,
+                    onChanged: _setUseImageFilter,
+                  ),
+                ],
+              ),
+            ),
           ),
-          BottomNavigationBarItem(
-            icon: Icon(CupertinoIcons.map),
-            label: 'Map',
+          CupertinoTabBar(
+            currentIndex: _displayIndex,
+            onTap: (index) => setState(() => _displayIndex = index),
+            iconSize: 22.0,
+            items: const [
+              BottomNavigationBarItem(
+                icon: Icon(CupertinoIcons.music_note),
+                label: 'Music',
+              ),
+              BottomNavigationBarItem(
+                icon: Icon(CupertinoIcons.map),
+                label: 'Map',
+              ),
+            ],
           ),
         ],
       ),
