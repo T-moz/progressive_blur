@@ -16,7 +16,13 @@ out vec4 frag_color;
 
 void main() {
   vec2 uv = FlutterFragCoord().xy / child_size;
-  
+
+  // When Impeller uses the OpenGL(ES) backend the y-axis is reversed, so a
+  // shader used via ImageFilter.shader renders upside-down unless we invert it.
+#ifdef IMPELLER_TARGET_OPENGLES
+  uv.y = 1.0 - uv.y;
+#endif
+
   // Squaring the blur texture value makes it look more consistent?
   float blur_value = pow(texture(blur_texture, uv).r, 2.0);
   float sigma = blur_sigma * blur_value;

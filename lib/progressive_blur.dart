@@ -17,6 +17,22 @@ import 'package:flutter_shaders/flutter_shaders.dart';
 ///
 /// The blur is applied in two passes: first horizontally and then vertically.
 ///
+/// Two implementations are available:
+///
+/// * On Impeller, each pass is a separate [ui.ImageFilter.shader] and the two
+///   are chained with [ui.ImageFilter.compose], applied to the child via an
+///   [ImageFiltered] widget. With this implementation the blur parameters are
+///   read when the widget is built or its configuration changes; animating
+///   them every frame is not supported (see
+///   https://github.com/flutter/flutter/issues/163302).
+/// * On other backends (Skia, web), the child subtree is rendered into a
+///   composited layer and the resulting [ui.Image] is bound as a sampler
+///   (via `AnimatedSampler` from `flutter_shaders`).
+///
+/// The implementation is selected automatically at runtime via
+/// [ui.ImageFilter.isShaderFilterSupported]. To force a specific
+/// implementation, set [useImageFilter].
+///
 /// The blur shader should be precached before using this widget to avoid a
 /// pop-in effect. You can do this by calling [ProgressiveBlurWidget.precache] as
 /// early as possible in your app (e.g. in `main()`).
@@ -44,10 +60,31 @@ class ProgressiveBlurWidget extends StatefulWidget {
   static const _shaderAssetKey =
       'packages/progressive_blur/lib/shaders/progressive_blur.frag';
 
+  /// The fragment program loaded by [precache], shared across all instances.
+  static ui.FragmentProgram? _program;
+
+  /// Overrides the automatic implementation selection.
+  ///
+  /// * `null` (default): use the [ui.ImageFilter.shader] implementation when
+  ///   the backend supports it (Impeller), otherwise fall back to the
+  ///   `AnimatedSampler` implementation.
+  /// * `true`: always use the [ui.ImageFilter.shader] implementation.
+  /// * `false`: always use the `AnimatedSampler` implementation (render the
+  ///   subtree into a composited layer and bind the resulting [ui.Image] as a
+  ///   sampler).
+  static bool? useImageFilter;
+
+  static bool get _shouldUseImageFilter =>
+      useImageFilter ?? ui.ImageFilter.isShaderFilterSupported;
+
   /// Precaches the blur shader so that it can be used synchronously later.
   /// This should be called as early as possible in your app (e.g. in `main()`).
-  static Future<void> precache() {
-    return ShaderBuilder.precacheShader(_shaderAssetKey);
+  ///
+  /// Both implementations are precached so that [useImageFilter] can be
+  /// changed at any point afterwards.
+  static Future<void> precache() async {
+    _program ??= await ui.FragmentProgram.fromAsset(_shaderAssetKey);
+    await ShaderBuilder.precacheShader(_shaderAssetKey);
   }
 
   /// A simple constructor that allows to specify a linear gradient blur.
@@ -88,6 +125,7 @@ class _ProgressiveBlurWidgetState extends State<ProgressiveBlurWidget> {
   /// Disposes of the old blur texture and creates a new one if necessary.
   void _maybeCreateBlurTexture() {
     _managedBlurTexture?.dispose();
+    _managedBlurTexture = null;
 
     if (widget.linearGradientBlur != null) {
       _managedBlurTexture = widget.linearGradientBlur!.createTexture(
@@ -104,21 +142,20 @@ class _ProgressiveBlurWidgetState extends State<ProgressiveBlurWidget> {
     if (widget.blurTexture != null && oldWidget.blurTexture == null) {
       _managedBlurTexture?.dispose();
       _managedBlurTexture = null;
-      return;
-    }
+    } else {
+      var shouldCreateBlurTexture = false;
 
-    var shouldCreateBlurTexture = false;
+      if (widget.blurTextureDimensions != oldWidget.blurTextureDimensions) {
+        shouldCreateBlurTexture = true;
+      }
 
-    if (widget.blurTextureDimensions != oldWidget.blurTextureDimensions) {
-      shouldCreateBlurTexture = true;
-    }
+      if (widget.linearGradientBlur != oldWidget.linearGradientBlur) {
+        shouldCreateBlurTexture = true;
+      }
 
-    if (widget.linearGradientBlur != oldWidget.linearGradientBlur) {
-      shouldCreateBlurTexture = true;
-    }
-
-    if (shouldCreateBlurTexture) {
-      _maybeCreateBlurTexture();
+      if (shouldCreateBlurTexture) {
+        _maybeCreateBlurTexture();
+      }
     }
   }
 
@@ -132,62 +169,230 @@ class _ProgressiveBlurWidgetState extends State<ProgressiveBlurWidget> {
 
   @override
   Widget build(BuildContext context) {
+    final Widget blurred;
+
+    if (ProgressiveBlurWidget._shouldUseImageFilter) {
+      blurred = _ImpellerProgressiveBlurWidget(
+        blurTexture: blurTexture,
+        sigma: widget.sigma,
+        tintColor: widget.tintColor,
+        child: widget.child,
+      );
+    } else {
+      blurred = _SkiaProgressiveBlurWidget(
+        blurTexture: blurTexture,
+        sigma: widget.sigma,
+        tintColor: widget.tintColor,
+        child: widget.child,
+      );
+    }
+
+    return RepaintBoundary(child: blurred);
+  }
+}
+
+/// The fallback implementation for backends without [ui.ImageFilter.shader]
+/// support (Skia, web).
+///
+/// Renders the child subtree into a composited layer and binds the resulting
+/// [ui.Image] as a sampler, drawing the two blur passes manually.
+class _SkiaProgressiveBlurWidget extends StatelessWidget {
+  const _SkiaProgressiveBlurWidget({
+    required this.blurTexture,
+    required this.sigma,
+    required this.tintColor,
+    required this.child,
+  });
+
+  final ui.Image blurTexture;
+  final double sigma;
+  final Color tintColor;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
     // The output texture should be scaled by the device pixel ratio.
     final devicePixelRatio = MediaQuery.devicePixelRatioOf(context);
 
-    return RepaintBoundary(
-      child: ShaderBuilder(
-        (context, shader, child) {
-          return AnimatedSampler(
-            (image, size, canvas) {
-              final scaledSize = size * devicePixelRatio;
+    return ShaderBuilder(
+      (context, shader, child) {
+        return AnimatedSampler(
+          (image, size, canvas) {
+            final scaledSize = size * devicePixelRatio;
 
-              // First do X-axis pass
-              final firstPassRecorder = ui.PictureRecorder();
-              final firstPassCanvas = Canvas(firstPassRecorder);
+            // First do X-axis pass
+            final firstPassRecorder = ui.PictureRecorder();
+            final firstPassCanvas = Canvas(firstPassRecorder);
 
-              shader.setImageSampler(0, image); // child_texture
-              shader.setImageSampler(1, blurTexture); // blur_texture
+            shader.setImageSampler(0, image); // child_texture
+            shader.setImageSampler(1, blurTexture); // blur_texture
 
-              shader.setFloat(0, scaledSize.width); // child_size.x
-              shader.setFloat(1, scaledSize.height); // child_size.y
-              shader.setFloat(2, widget.sigma); // blur_sigma
-              shader.setFloat(3, 0.0); // blur_direction
-              shader.setFloat(4, widget.tintColor.r); // tint.r
-              shader.setFloat(5, widget.tintColor.g); // tint.g
-              shader.setFloat(6, widget.tintColor.b); // tint.b
-              shader.setFloat(7, widget.tintColor.a); // tint.a
+            shader.setFloat(0, scaledSize.width); // child_size.x
+            shader.setFloat(1, scaledSize.height); // child_size.y
+            shader.setFloat(2, sigma); // blur_sigma
+            shader.setFloat(3, 0.0); // blur_direction
+            shader.setFloat(4, tintColor.r); // tint.r
+            shader.setFloat(5, tintColor.g); // tint.g
+            shader.setFloat(6, tintColor.b); // tint.b
+            shader.setFloat(7, tintColor.a); // tint.a
 
-              // Draw the first pass
-              final paint = Paint()..shader = shader;
-              firstPassCanvas.drawRect(Offset.zero & scaledSize, paint);
+            // Draw the first pass
+            final paint = Paint()..shader = shader;
+            firstPassCanvas.drawRect(Offset.zero & scaledSize, paint);
 
-              // End the first pass and get the image reference
-              final firstPassPicture = firstPassRecorder.endRecording();
-              final firstPassImage = firstPassPicture.toImageSync(
-                scaledSize.width.toInt(),
-                scaledSize.height.toInt(),
-              );
+            // End the first pass and get the image reference
+            final firstPassPicture = firstPassRecorder.endRecording();
+            final firstPassImage = firstPassPicture.toImageSync(
+              scaledSize.width.toInt(),
+              scaledSize.height.toInt(),
+            );
 
-              // Then do Y-axis pass
-              shader.setImageSampler(0, firstPassImage); // child_texture
-              shader.setFloat(3, 1.0); // blur_direction
+            // Then do Y-axis pass
+            shader.setImageSampler(0, firstPassImage); // child_texture
+            shader.setFloat(3, 1.0); // blur_direction
 
-              // Scale the canvas back so that we can apply the pixel ratio
-              // scaling.
-              canvas.scale(1 / devicePixelRatio);
-              canvas.drawRect(Offset.zero & scaledSize, paint);
+            // Scale the canvas back so that we can apply the pixel ratio
+            // scaling.
+            canvas.scale(1 / devicePixelRatio);
+            canvas.drawRect(Offset.zero & scaledSize, paint);
 
-              // Dispose the first pass resources.
-              firstPassPicture.dispose();
-              firstPassImage.dispose();
-            },
-            child: child!,
-          );
-        },
-        assetKey: ProgressiveBlurWidget._shaderAssetKey,
-        child: widget.child,
-      ),
+            // Dispose the first pass resources.
+            firstPassPicture.dispose();
+            firstPassImage.dispose();
+          },
+          child: child!,
+        );
+      },
+      assetKey: ProgressiveBlurWidget._shaderAssetKey,
+      child: child,
+    );
+  }
+}
+
+/// The Impeller implementation, built on [ui.ImageFilter.shader].
+///
+/// The two blur passes are separate shader filters chained with
+/// [ui.ImageFilter.compose] and applied to the child via [ImageFiltered].
+class _ImpellerProgressiveBlurWidget extends StatefulWidget {
+  const _ImpellerProgressiveBlurWidget({
+    required this.blurTexture,
+    required this.sigma,
+    required this.tintColor,
+    required this.child,
+  });
+
+  final ui.Image blurTexture;
+  final double sigma;
+  final Color tintColor;
+  final Widget child;
+
+  @override
+  State<_ImpellerProgressiveBlurWidget> createState() =>
+      _ImpellerProgressiveBlurWidgetState();
+}
+
+class _ImpellerProgressiveBlurWidgetState
+    extends State<_ImpellerProgressiveBlurWidget> {
+  /// The horizontal (first) and vertical (second) pass shaders.
+  ui.FragmentShader? _xShader;
+  ui.FragmentShader? _yShader;
+
+  /// The composed two-pass image filter applied to the child.
+  ui.ImageFilter? _filter;
+
+  @override
+  void initState() {
+    super.initState();
+    _rebuildFilter();
+  }
+
+  @override
+  void didUpdateWidget(covariant _ImpellerProgressiveBlurWidget oldWidget) {
+    super.didUpdateWidget(oldWidget);
+
+    // Rebuild the filter whenever any input that feeds it changes. A fresh
+    // ImageFilter instance is required for the change to take effect
+    // (see https://github.com/flutter/flutter/issues/163302).
+    if (widget.sigma != oldWidget.sigma ||
+        widget.tintColor != oldWidget.tintColor ||
+        widget.blurTexture != oldWidget.blurTexture) {
+      _rebuildFilter();
+    }
+  }
+
+  @override
+  void dispose() {
+    _xShader?.dispose();
+    _yShader?.dispose();
+    super.dispose();
+  }
+
+  /// Sets the uniforms that the engine does not manage automatically.
+  ///
+  /// For [ui.ImageFilter.shader], the engine sets sampler 0 to the filter input
+  /// (`child_texture`) and floats 0,1 to its size (`child_size`). Everything
+  /// else is set here.
+  /// Note: the tint is set on both passes, like the `AnimatedSampler`
+  /// implementation does (which sets the uniforms once and draws both passes
+  /// with them), so that the two implementations render identically.
+  void _setUniforms(
+    ui.FragmentShader shader, {
+    required double direction,
+  }) {
+    shader.setImageSampler(1, widget.blurTexture); // blur_texture
+    shader.setFloat(2, widget.sigma); // blur_sigma
+    shader.setFloat(3, direction); // blur_direction
+    shader.setFloat(4, widget.tintColor.r); // tint.r
+    shader.setFloat(5, widget.tintColor.g); // tint.g
+    shader.setFloat(6, widget.tintColor.b); // tint.b
+    shader.setFloat(7, widget.tintColor.a); // tint.a
+  }
+
+  /// Rebuilds the two pass shaders and the composed filter from the current
+  /// configuration.
+  void _rebuildFilter() {
+    _xShader?.dispose();
+    _yShader?.dispose();
+    _xShader = null;
+    _yShader = null;
+
+    final program = ProgressiveBlurWidget._program;
+    assert(
+      program != null,
+      'ProgressiveBlurWidget.precache() must be awaited before the widget is '
+      'built.',
+    );
+    if (program == null) {
+      _filter = null;
+      return;
+    }
+
+    final xShader = program.fragmentShader();
+    final yShader = program.fragmentShader();
+
+    _setUniforms(xShader, direction: 0.0);
+    _setUniforms(yShader, direction: 1.0);
+
+    _xShader = xShader;
+    _yShader = yShader;
+
+    _filter = ui.ImageFilter.compose(
+      outer: ui.ImageFilter.shader(yShader),
+      inner: ui.ImageFilter.shader(xShader),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final filter = _filter;
+
+    if (filter == null) {
+      return widget.child;
+    }
+
+    return ImageFiltered(
+      imageFilter: filter,
+      child: widget.child,
     );
   }
 }
