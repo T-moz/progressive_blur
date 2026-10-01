@@ -60,7 +60,8 @@ void main() {
 
   // The kernel spans ceil(3 * sigma) texels on each side of the center, up to
   // MAX_KERNEL_RADIUS.
-  int kernel_radius = min(int(ceil(3.0 * sigma)), MAX_KERNEL_RADIUS);
+  // Kept as a float: SkSL has no integer min().
+  float kernel_radius = min(ceil(3.0 * sigma), float(MAX_KERNEL_RADIUS));
   vec2 texel_step =
       (blur_direction == 0.0 ? vec2(1.0, 0.0) : vec2(0.0, 1.0)) / child_size;
 
@@ -83,14 +84,14 @@ void main() {
   // the position that weighs them w(v) and w(v + 1). child_texture must be
   // sampled with a linear filter (see the Dart side).
   for (int v = 1; v <= MAX_KERNEL_RADIUS; v += 2) {
-    if (v > kernel_radius) break;
+    if (float(v) > kernel_radius) break;
 
     weight *= ratio;
     ratio *= ratio_growth;
     float near_weight = weight;
     weight *= ratio;
     ratio *= ratio_growth;
-    float far_weight = v < kernel_radius ? weight : 0.0;
+    float far_weight = float(v) < kernel_radius ? weight : 0.0;
 
     float pair_weight = near_weight + far_weight;
     float far_share = pair_weight > 0.0 ? far_weight / pair_weight : 0.0;
