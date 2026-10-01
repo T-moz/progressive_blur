@@ -77,6 +77,45 @@ next rebuild), and both implementations render identically.
 > frame is not supported yet (see
 > [flutter/flutter#163302](https://github.com/flutter/flutter/issues/163302)).
 
+## Blurring bands of the screen: `ProgressiveBackdropBlur`
+
+`ProgressiveBlurWidget` runs the blur shader over every pixel of its child,
+even where the strength map is zero, and moves the child into a new layer
+when it is inserted. When the blur only covers bands (e.g. the top and bottom
+edges of a scrolling list) and the content sits on an opaque background, stack
+a `ProgressiveBackdropBlur` on top of the content instead. It blurs what is
+painted behind it, inside `bands` only, and leaves the content's widgets and
+layers untouched (Impeller only).
+
+```dart
+Stack(
+  children: [
+    content,
+    Positioned.fill(
+      child: ProgressiveBackdropBlur(
+        sigma: 44,
+        linearGradientBlur: const LinearGradientBlur(
+          values: [1, 0, 0, 1],
+          stops: [0, 0.15, 0.85, 1],
+          start: Alignment.bottomCenter,
+          end: Alignment.topCenter,
+        ),
+        // Where the strength map is non-zero, in this widget's coordinates.
+        bands: [topBand, bottomBand],
+        // The color behind `content`, so the screen edges blur like
+        // ProgressiveBlurWidget's.
+        backgroundColor: background,
+      ),
+    ),
+  ],
+)
+```
+
+The strength map is laid over the widget's bounds exactly like
+`ProgressiveBlurWidget` lays it over its child, so both render the same image
+as long as each band contains every pixel the kernel reaches. All bands share
+one backdrop snapshot.
+
 ## Additional information
 
 Feel free to report bugs/issues on GitHub.
